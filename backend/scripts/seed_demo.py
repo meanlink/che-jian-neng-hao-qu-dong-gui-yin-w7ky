@@ -1,12 +1,36 @@
-import time, json
+import time, json, calendar
+from types import SimpleNamespace
 from sqlalchemy import select, func
 from src.config.database import Session
 from migrations.initial import migrate
-from src.models import User, Dataset, Job, Report, Delivery, Audit
+from src.models import User, Dataset, Job, Report, Delivery, Audit, Bill, ReconGroup
 from src.services.business import metadata, seed_records, analyze
 from src.services.reports import deliver
+from src.services import recon as recon_service
 from src.utils.security import hash_password
 from src.utils.serialization import checksum
+def seed_recon(db,d,admin):
+    by_month={}
+    for row in d.records:by_month.setdefault(row['day'][:7],[]).append(row)
+    def month_sum(month,end=None):return round(sum(r['kwh'] for r in by_month.get(month,[]) if end is None or r['day']<=end),2)
+    def month_end(month):return month+'-'+str(calendar.monthrange(int(month[:4]),int(month[5:]))[1]).zfill(2)
+    bills={}
+    for no,month,end in [('GD-202605-P01','2026-05',None),('GD-202606-P01','2026-06',None),('GD-202607-P01','2026-07',None)]:
+        b=db.scalar(select(Bill).where(Bill.bill_no==no))
+        if not b:
+            b=Bill(bill_no=no,line='冲压P01',start_day=month+'-01',end_day=month_end(month),kwh=month_sum(month,end),source='seed-供电账单-2026.csv',created_at=time.time())
+            db.add(b);db.flush()
+        bills[month]=b
+    def make_group(name,month,days):
+        g=db.scalar(select(ReconGroup).where(ReconGroup.name==name))
+        if g:return g
+        data=SimpleNamespace(name=name,bill_id=bills[month].id,dataset_id=d.id,days=days)
+        return recon_service.create_group(db,data,admin)
+    may_days=[r['day'] for r in by_month['2026-05']]
+    g=make_group('2026年5月 冲压P01 电费核销','2026-05',may_days)
+    if g.status=='pending':recon_service.confirm(db,g.id,admin)
+    july_days=[r['day'] for r in by_month['2026-07'] if r['day']<='2026-07-30']
+    make_group('2026年7月 冲压P01 电费核销','2026-07',july_days)
 def seed():
     migrate()
     with Session() as db:
@@ -32,7 +56,9 @@ def seed():
             db.add(r);db.flush();deliver(db,r)
             db.add(Audit(actor='seed',action='demo.baseline',detail={'dataset':d.id},at=time.time()))
         db.commit()
-        counts={model.__tablename__:db.scalar(select(func.count()).select_from(model)) for model in [User,Dataset,Job,Report,Delivery,Audit]}
+        admin=db.scalar(select(User).where(User.role=='admin'))
+        seed_recon(db,d,admin)
+        counts={model.__tablename__:db.scalar(select(func.count()).select_from(model)) for model in [User,Dataset,Job,Report,Delivery,Audit,Bill,ReconGroup]}
         print(json.dumps(counts,ensure_ascii=False))
         return counts
 if __name__=='__main__':seed()

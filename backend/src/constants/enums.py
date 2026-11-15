@@ -8,3 +8,8 @@ class JobStatus(str, Enum):
     running = 'running'
     completed = 'completed'
     failed = 'failed'
+class ReconStatus(str, Enum):
+    pending = 'pending'
+    mismatch = 'mismatch'
+    confirmed = 'confirmed'
+    revoked = 'revoked'
